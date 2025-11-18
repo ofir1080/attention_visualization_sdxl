@@ -30,7 +30,7 @@ def get_attn(emb, res, layer):
 
 @torch.no_grad()
 def attn_vis(
-        self, 
+        self,
         prompt=None,
         prompt_2=None,
         height=None,
@@ -289,7 +289,7 @@ def self_tokenize(self, prompt):
 #     return out
 
 
-def gen_img(prompt, model_path, seed):
+def gen_img(prompt, seed, width, height):
     ## prepare sdxl attnvis pipeline
     global cross_attn_map_list
     global self_attn_map_list
@@ -297,9 +297,9 @@ def gen_img(prompt, model_path, seed):
     device = 'cuda'
     if pipe is None:
         print("init pipeline")
-        pipe = StableDiffusionXLPipeline.from_single_file(
-            model_path, torch_dtype=torch.float16, variant="fp16", use_safetensors=True, local_files_only=True, 
-            original_config_file="./sd_xl_base.yaml"
+        pipe = StableDiffusionXLPipeline.from_pretrained(
+            "stabilityai/stable-diffusion-xl-base-1.0",
+            torch_dtype=torch.float16
         )
         pipe.enable_xformers_memory_efficient_attention()
         pipe.to(device)
@@ -308,7 +308,7 @@ def gen_img(prompt, model_path, seed):
     print("start inference")
     generator = torch.Generator(device=device)
     generator = generator.manual_seed(int(seed))
-    img, cross_attn_map_list, self_attn_map_list = pipe.attnvis(prompt, generator=generator)
+    img, cross_attn_map_list, self_attn_map_list = pipe.attnvis(prompt, generator=generator, width=int(width), height=int(height))
     token_idx = pipe.self_tokenize(prompt)
     return img[0], token_idx
 
@@ -320,8 +320,8 @@ def return_cross_attn_map(layer, token_idx):
     attn_map_list = cross_attn_map_list
     attn_layer = attn_map_list[layer]
     attn_mean_layer = np.mean(attn_layer, axis=0)
-    size = np.sqrt(attn_mean_layer.shape[0]).astype(int)
-    attn_map_single = attn_mean_layer.reshape(size, size, 77)
+    size = np.sqrt(attn_mean_layer.shape[0] / 2).astype(int)
+    attn_map_single = attn_mean_layer.reshape(size, -1, 77)
     np_img = attn_map_single[:, :, token_idx]
     attn_img = Image.fromarray((to_norm(np_img) * 255).astype(np.uint8))
     return attn_img
@@ -335,8 +335,8 @@ def return_group_cross_attn_map(layer, token_idx):
         if group_name in key:
             attn_layer = attn_map_list[key]
             attn_mean_layer = np.mean(attn_layer, axis=0)
-            size = np.sqrt(attn_mean_layer.shape[0]).astype(int)
-            attn_map_single = attn_mean_layer.reshape(size, size, 77)
+            size = np.sqrt(attn_mean_layer.shape[0] / 2).astype(int)
+            attn_map_single = attn_mean_layer.reshape(size, -1, 77)
             np_img = to_norm(attn_map_single[:, :, token_idx]) if np_img is None else np.concatenate((np_img, to_norm(attn_map_single[:, :, token_idx])), axis=1)
     height, length = np_img.shape[0], np_img.shape[1]
     while length > height * 3:
@@ -350,8 +350,8 @@ def return_self_attn_map(layer):
     attn_map_list = self_attn_map_list
     attn_layer = attn_map_list[layer]
     attn_mean_layer = np.mean(attn_layer, axis=0)
-    size = np.sqrt(attn_mean_layer.shape[0]).astype(int)
-    attn_map_single = attn_mean_layer.reshape(-1, size, size)
+    size = np.sqrt(attn_mean_layer.shape[0] / 2).astype(int)
+    attn_map_single = attn_mean_layer.reshape(-1, size, 2*size)
     np_img = np.mean(attn_map_single, axis=0)
     attn_img = Image.fromarray((to_norm(np_img) * 255).astype(np.uint8))
     return attn_img
@@ -365,8 +365,8 @@ def return_group_self_attn_map(layer):
         if group_name in key:
             attn_layer = attn_map_list[key]
             attn_mean_layer = np.mean(attn_layer, axis=0)
-            size = np.sqrt(attn_mean_layer.shape[0]).astype(int)
-            attn_map_single = attn_mean_layer.reshape(-1, size, size)
+            size = np.sqrt(attn_mean_layer.shape[0] / 2).astype(int)
+            attn_map_single = attn_mean_layer.reshape(-1, size, 2*size)
             np_img = to_norm(np.mean(attn_map_single, axis=0)) if np_img is None else np.concatenate((np_img, to_norm(np.mean(attn_map_single, axis=0))), axis=1)
     height, length = np_img.shape[0], np_img.shape[1]
     if 'up_blocks.0' in layer:
@@ -408,9 +408,11 @@ if __name__ ==  "__main__":
         gr.Markdown("Attntion map visualization in sdxl")
         with gr.Row():
             with gr.Column(scale=1):
-                inp = gr.Textbox(placeholder="Input prompts", label='Prompts',)
+                inp = gr.Textbox(placeholder="Input prompts", label='Prompts', value="A photo of a chameleon sitting on a branch in the jungle")
+                with gr.Row():
+                    width = gr.Textbox(placeholder="Width", label='Width', value="1024")
+                    height = gr.Textbox(placeholder="Height", label='Height', value="1024")
                 seed = gr.Textbox(placeholder="Seed", label='Seed', value="-1")
-                model_path = gr.Textbox(label='Model path', placeholder="Model path", value="/path/to/sdxl_model/sd_xl_base_1.0.safetensors")
                 out_token_idx = gr.Textbox(placeholder="Token index 0", label='Token&IDs Mapping',)
             with gr.Column(scale=1):
                 out_img = gr.Image(shape=(256, 256))
@@ -446,7 +448,7 @@ if __name__ ==  "__main__":
         clear_btn = gr.Button("Clear")
         
 
-        btn.click(fn=gen_img, inputs=[inp, model_path, seed], outputs=[out_img, out_token_idx])
+        btn.click(fn=gen_img, inputs=[inp, seed, width, height], outputs=[out_img, out_token_idx])
         cross_attn_btn_s.click(fn=return_cross_attn_map, inputs=[cross_layers_name, token_idx], outputs=out2)
         cross_attn_btn_g.click(fn=return_group_cross_attn_map, inputs=[cross_layers_name, token_idx], outputs=out_group)
         self_attn_btn_s.click(fn=return_self_attn_map, inputs=[self_layers_name], outputs=out2)
